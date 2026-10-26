@@ -92,6 +92,16 @@ class PreferencesManager(context: Context) {
         _settings.value = newSettings
     }
 
+    fun loadPrayerLogs(dateString: String): Map<String, Boolean> {
+        return PrayerType.values().associate { type ->
+            type.id to prefs.getBoolean("prayer_log_${dateString}_${type.id}", false)
+        }
+    }
+
+    fun savePrayerLog(dateString: String, prayerType: String, completed: Boolean) {
+        prefs.edit().putBoolean("prayer_log_${dateString}_$prayerType", completed).apply()
+    }
+
     companion object {
         private const val KEY_AUTO_LOC = "key_auto_location"
         private const val KEY_CITY_NAME = "key_city_name"

@@ -7,14 +7,9 @@ import android.location.Location
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.audio.AdhanVoice
-import com.example.audio.AudioSources
 import com.example.audio.SoundManager
 import com.example.calculation.PrayerTimesCalculator
-import com.example.data.CitiesData
 import com.example.data.PreferencesManager
-import com.example.data.model.FirestorePrayerLog
-import com.example.data.model.FirestoreUserSettings
-import com.example.data.repository.NoorFirestoreRepository
 import com.example.model.AppSettings
 import com.example.model.CalculationMethod
 import com.example.model.CityLocation
@@ -23,16 +18,10 @@ import com.example.model.Madhhab
 import com.example.model.PrayerType
 import com.example.sensor.CompassSensorManager
 import com.google.android.gms.location.LocationServices
-import com.google.firebase.Firebase
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.auth.FirebaseUser
-import com.google.firebase.auth.auth
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -61,7 +50,6 @@ class NoorViewModel(application: Application) : AndroidViewModel(application) {
     val soundManager = SoundManager(application)
     val compassSensorManager = CompassSensorManager(application)
     private val fusedLocationClient = LocationServices.getFusedLocationProviderClient(application)
-    val firestoreRepository = NoorFirestoreRepository(application)
 
     private val _currentScreen = MutableStateFlow(NoorScreen.HOME)
     val currentScreen: StateFlow<NoorScreen> = _currentScreen.asStateFlow()
@@ -78,15 +66,11 @@ class NoorViewModel(application: Application) : AndroidViewModel(application) {
     private val _locationError = MutableStateFlow<String?>(null)
     val locationError: StateFlow<String?> = _locationError.asStateFlow()
 
-    // Auth state
-    private val _currentUser = MutableStateFlow<FirebaseUser?>(Firebase.auth.currentUser)
-    val currentUser: StateFlow<FirebaseUser?> = _currentUser.asStateFlow()
-
-    // Prayer tracker state for today
+    // Daily Prayer Tracker state (100% offline & local)
     private val todayString: String
         get() = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
 
-    private val _todayPrayerLogs = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    private val _todayPrayerLogs = MutableStateFlow<Map<String, Boolean>>(preferencesManager.loadPrayerLogs(todayString))
     val todayPrayerLogs: StateFlow<Map<String, Boolean>> = _todayPrayerLogs.asStateFlow()
 
     // Compass State
@@ -101,56 +85,9 @@ class NoorViewModel(application: Application) : AndroidViewModel(application) {
     private val _tasbihState = MutableStateFlow(TasbihState())
     val tasbihState: StateFlow<TasbihState> = _tasbihState.asStateFlow()
 
-    private var authListener: FirebaseAuth.AuthStateListener? = null
-
     init {
         recalculatePrayers()
         startPeriodicTimer()
-        setupAuthListener()
-    }
-
-    private fun setupAuthListener() {
-        authListener = FirebaseAuth.AuthStateListener { auth ->
-            val user = auth.currentUser
-            _currentUser.value = user
-            if (user != null) {
-                syncWithFirestoreOnSignIn()
-            } else {
-                _todayPrayerLogs.value = emptyMap()
-            }
-        }
-        Firebase.auth.addAuthStateListener(authListener!!)
-    }
-
-    private fun syncWithFirestoreOnSignIn() {
-        viewModelScope.launch {
-            try {
-                // Upload local settings to Cloud Firestore
-                val current = _settings.value
-                val firestoreSettings = FirestoreUserSettings(
-                    userId = Firebase.auth.currentUser?.uid ?: "",
-                    useAutoLocation = current.useAutoLocation,
-                    cityName = current.selectedCity.nameArabic,
-                    countryName = current.selectedCity.countryArabic,
-                    latitude = current.selectedCity.latitude,
-                    longitude = current.selectedCity.longitude,
-                    timezoneHours = current.selectedCity.timezoneHours,
-                    methodId = current.method.id,
-                    madhhabId = current.madhhab.id,
-                    voiceId = current.selectedVoiceId,
-                    fajrVoiceId = current.fajrVoiceId,
-                    volume = current.volume.toDouble(),
-                    isDarkTheme = current.isDarkTheme
-                )
-                firestoreRepository.saveUserSettings(firestoreSettings)
-
-                // Observe prayer logs
-                firestoreRepository.observePrayerLogs(todayString).collect { logs ->
-                    _todayPrayerLogs.value = logs.associate { it.prayerType to it.isCompleted }
-                }
-            } catch (_: Exception) {
-            }
-        }
     }
 
     fun togglePrayerTrack(prayerType: PrayerType) {
@@ -160,14 +97,7 @@ class NoorViewModel(application: Application) : AndroidViewModel(application) {
         updatedMap[prayerType.id] = newStatus
         _todayPrayerLogs.value = updatedMap
 
-        if (Firebase.auth.currentUser != null) {
-            viewModelScope.launch {
-                try {
-                    firestoreRepository.togglePrayerLog(todayString, prayerType.id, newStatus)
-                } catch (_: Exception) {
-                }
-            }
-        }
+        preferencesManager.savePrayerLog(todayString, prayerType.id, newStatus)
     }
 
     fun setScreen(screen: NoorScreen) {
@@ -181,7 +111,6 @@ class NoorViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
-        authListener?.let { Firebase.auth.removeAuthStateListener(it) }
         compassSensorManager.stopListening()
         soundManager.stopAdhan()
     }
@@ -218,30 +147,6 @@ class NoorViewModel(application: Application) : AndroidViewModel(application) {
         _settings.value = newSettings
         preferencesManager.updateSettings(newSettings)
         recalculatePrayers()
-
-        if (Firebase.auth.currentUser != null) {
-            viewModelScope.launch {
-                try {
-                    val firestoreSettings = FirestoreUserSettings(
-                        userId = Firebase.auth.currentUser?.uid ?: "",
-                        useAutoLocation = newSettings.useAutoLocation,
-                        cityName = newSettings.selectedCity.nameArabic,
-                        countryName = newSettings.selectedCity.countryArabic,
-                        latitude = newSettings.selectedCity.latitude,
-                        longitude = newSettings.selectedCity.longitude,
-                        timezoneHours = newSettings.selectedCity.timezoneHours,
-                        methodId = newSettings.method.id,
-                        madhhabId = newSettings.madhhab.id,
-                        voiceId = newSettings.selectedVoiceId,
-                        fajrVoiceId = newSettings.fajrVoiceId,
-                        volume = newSettings.volume.toDouble(),
-                        isDarkTheme = newSettings.isDarkTheme
-                    )
-                    firestoreRepository.saveUserSettings(firestoreSettings)
-                } catch (_: Exception) {
-                }
-            }
-        }
     }
 
     fun setCity(city: CityLocation) {
