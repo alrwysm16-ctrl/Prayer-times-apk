@@ -1,0 +1,6 @@
+{
+  "name": "نور",
+  "description": "تطبيق نور لمواقيت الصلاة واتجاه القبلة بدقة متناهية وبدون إنترنت مع تنبيهات الأذان",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
